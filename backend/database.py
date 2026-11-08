@@ -42,6 +42,17 @@ def _migrate() -> None:
         if first:
             conn.execute("UPDATE roles SET owner_id = ? WHERE owner_id IS NULL", (first["id"],))
 
+        session_cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        session_migrations = {
+            "conversation_json": "ALTER TABLE sessions ADD COLUMN conversation_json TEXT DEFAULT '[]'",
+            "mark_json": "ALTER TABLE sessions ADD COLUMN mark_json TEXT DEFAULT '{}'",
+            "mark_source": "ALTER TABLE sessions ADD COLUMN mark_source TEXT DEFAULT ''",
+            "recommendation": "ALTER TABLE sessions ADD COLUMN recommendation TEXT DEFAULT ''",
+        }
+        for col, ddl in session_migrations.items():
+            if col not in session_cols:
+                conn.execute(ddl)
+
 
 def init_db() -> None:
     with _connect() as conn:
@@ -70,6 +81,10 @@ def init_db() -> None:
                 average_score REAL,
                 passed INTEGER,
                 answers_json TEXT,
+                conversation_json TEXT DEFAULT '[]',
+                mark_json TEXT DEFAULT '{}',
+                mark_source TEXT DEFAULT '',
+                recommendation TEXT DEFAULT '',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (role_slug) REFERENCES roles(slug)
             );
@@ -425,13 +440,27 @@ def save_session(
     passed: bool,
     candidate_name: str | None = None,
     candidate_email: str | None = None,
+    conversation: list[dict[str, Any]] | None = None,
+    mark: dict[str, Any] | None = None,
 ) -> int:
+    """Persist a finished interview.
+
+    ``average_score``/``passed`` are the values used for the pass link. When a
+    final ``mark`` is supplied it becomes the authoritative result stored on
+    the session (the admin dashboard reads it).
+    """
+    if mark:
+        average_score = mark.get("overall_score", average_score)
+        passed = bool(mark.get("passed", passed))
+    mark_source = str((mark or {}).get("source") or "")
+    recommendation = str((mark or {}).get("recommendation") or "")
     with _connect() as conn:
         cur = conn.execute(
             """
             INSERT INTO sessions
-            (role_slug, candidate_name, candidate_email, average_score, passed, answers_json)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (role_slug, candidate_name, candidate_email, average_score, passed, answers_json,
+             conversation_json, mark_json, mark_source, recommendation)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 role_slug,
@@ -440,6 +469,10 @@ def save_session(
                 average_score,
                 1 if passed else 0,
                 json.dumps(answers),
+                json.dumps(conversation or []),
+                json.dumps(mark or {}),
+                mark_source,
+                recommendation,
             ),
         )
         return int(cur.lastrowid)
@@ -465,6 +498,19 @@ def list_sessions(role_slug: str | None = None, owner_id: int | None = None,
     with _connect() as conn:
         rows = conn.execute(query, tuple(params)).fetchall()
         return [_session_from_row(r) for r in rows]
+
+
+def get_session(session_id: int, owner_id: int | None = None) -> dict[str, Any] | None:
+    """Full session detail (mark + full conversation), owner-scoped."""
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    if not row:
+        return None
+    if owner_id is not None:
+        role = get_role(row["role_slug"])
+        if role and role.get("owner_id") not in (None, owner_id):
+            return None
+    return _session_from_row(row, include_conversation=True)
 
 
 # ---------------------------------------------------------------------------
@@ -573,17 +619,33 @@ def _role_from_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _session_from_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+def _json_column(row: sqlite3.Row, column: str, default: Any) -> Any:
+    try:
+        if column not in row.keys():
+            return default
+        value = row[column]
+        return json.loads(value) if value else default
+    except (json.JSONDecodeError, TypeError):
+        return default
+
+
+def _session_from_row(row: sqlite3.Row, include_conversation: bool = False) -> dict[str, Any]:
+    session = {
         "id": row["id"],
         "role_slug": row["role_slug"],
         "candidate_name": row["candidate_name"],
         "candidate_email": row["candidate_email"],
         "average_score": row["average_score"],
         "passed": bool(row["passed"]),
-        "answers": json.loads(row["answers_json"]),
+        "answers": _json_column(row, "answers_json", []),
+        "mark": _json_column(row, "mark_json", {}),
+        "mark_source": (row["mark_source"] if "mark_source" in row.keys() else "") or "",
+        "recommendation": (row["recommendation"] if "recommendation" in row.keys() else "") or "",
         "created_at": row["created_at"],
     }
+    if include_conversation:
+        session["conversation"] = _json_column(row, "conversation_json", [])
+    return session
 
 
 if __name__ == "__main__":

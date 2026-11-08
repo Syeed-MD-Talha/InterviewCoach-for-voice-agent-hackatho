@@ -114,6 +114,43 @@
 
   .toast { position: fixed; bottom: 24px; right: 24px; padding: 13px 20px; background: var(--text); color: #fffdf8; border-radius: 12px; font-size: 14px; font-weight: 500; opacity: 0; transform: translateY(8px); transition: opacity .2s, transform .2s; pointer-events: none; box-shadow: 0 14px 40px rgba(42,38,32,.25); max-width: 360px; }
   .toast.show { opacity: 1; transform: none; }
+
+  .badge.rec { background: var(--accent-soft); color: var(--accent); }
+  .badge.borderline { background: #f6ecd4; color: #9a6b1f; }
+  .badge.nohire { background: var(--red-soft); color: var(--red); }
+  .mark-src { font-size: 11.5px; color: var(--faint); margin-left: 6px; }
+  .view-btn { background: var(--accent-soft); color: var(--accent); border: 1px solid transparent; padding: 6px 12px; font-size: 12.5px; border-radius: 999px; white-space: nowrap; }
+  .view-btn:hover { border-color: var(--accent); }
+
+  .overlay { position: fixed; inset: 0; background: rgba(42,38,32,.5); backdrop-filter: blur(6px); display: flex; align-items: flex-start; justify-content: center; padding: 32px 20px; z-index: 50; overflow-y: auto; }
+  .overlay[hidden] { display: none !important; }
+  .modal { width: 100%; max-width: 760px; background: var(--paper); border: 1px solid var(--border); border-radius: 20px; padding: 30px; box-shadow: 0 30px 90px rgba(42,38,32,.3); }
+  .modal-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 18px; }
+  .modal-head h2 { font-family: var(--serif); font-weight: 600; font-size: 26px; letter-spacing: -.01em; }
+  .modal-head .sub { margin: 4px 0 0; }
+  .modal-head .spacer { flex: 1; }
+  .modal-close { background: var(--sunk); border: 1px solid var(--border2); color: var(--muted); padding: 7px 14px; font-size: 13px; border-radius: 999px; }
+  .mark-hero { display: flex; align-items: center; gap: 22px; background: var(--sunk); border: 1px solid var(--border); border-radius: 14px; padding: 18px 22px; margin-bottom: 18px; }
+  .mark-score { font-family: var(--serif); font-size: 52px; line-height: 1; letter-spacing: -.02em; }
+  .mark-score small { font-family: var(--font); font-size: 15px; color: var(--muted); }
+  .mark-body { flex: 1; }
+  .mark-body p { font-size: 14px; color: var(--muted); margin-top: 6px; }
+  .mark-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 18px; }
+  @media (max-width: 640px) { .mark-cols { grid-template-columns: 1fr; } }
+  .mark-box { background: #fff; border: 1px solid var(--border); border-radius: 13px; padding: 15px 17px; }
+  .mark-box h4 { font-size: 13px; font-weight: 700; margin-bottom: 8px; }
+  .mark-box ul { margin-left: 18px; font-size: 13.5px; color: var(--muted); line-height: 1.6; }
+  .mark-box li { margin-bottom: 4px; }
+  .qmark { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin-bottom: 9px; background: #fff; }
+  .qmark .qtop { display: flex; gap: 10px; align-items: baseline; }
+  .qmark .qtop b { font-family: var(--serif); font-size: 17px; color: var(--accent); }
+  .qmark .qtop span { flex: 1; font-size: 13.5px; font-weight: 600; }
+  .qmark p { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .convo { max-height: 340px; overflow-y: auto; background: var(--sunk); border: 1px solid var(--border); border-radius: 13px; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+  .convo .turn { font-size: 13.5px; line-height: 1.55; background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; }
+  .convo .turn.assistant { border-left: 3px solid var(--accent); }
+  .convo .turn.user { border-left: 3px solid var(--green); margin-left: 18px; }
+  .convo .turn b { display: block; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); margin-bottom: 3px; }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
@@ -184,6 +221,19 @@
         <div id="sessions-list"><div class="empty">Loading sessions…</div></div>
       </section>
     </div>
+  </div>
+</div>
+<div class="overlay" id="session-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="session-modal-title">
+    <div class="modal-head">
+      <div>
+        <h2 id="session-modal-title">Candidate mark</h2>
+        <p class="sub" id="session-modal-sub"></p>
+      </div>
+      <div class="spacer"></div>
+      <button class="modal-close" id="session-modal-close">Close</button>
+    </div>
+    <div id="session-modal-body"></div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
@@ -319,12 +369,78 @@ async function loadSessions(){
   $('st-rate').textContent = sessions.length ? Math.round(passed/sessions.length*100)+'%' : '—';
   const box = $('sessions-list');
   if(!sessions.length){ box.innerHTML = '<div class="empty">No interviews yet. Share a role link to get started.</div>'; return; }
-  box.innerHTML = `<div class="tablewrap"><table><thead><tr><th>Candidate</th><th>Role</th><th>Score</th><th>Result</th><th>Date</th></tr></thead><tbody>
-    ${sessions.map(s=>`<tr><td><b>${esc(s.candidate_name||'Anonymous')}</b><div class="muted">${esc(s.candidate_email||'')}</div><div class="muted">${(s.answers||[]).length} answers</div></td>
-    <td>${esc(s.role_slug)}</td><td><b>${s.average_score}</b></td>
+  box.innerHTML = `<div class="tablewrap"><table><thead><tr><th>Candidate</th><th>Role</th><th>Final mark</th><th>Result</th><th>Recommendation</th><th>Date</th><th></th></tr></thead><tbody>
+    ${sessions.map(s=>{ const src = (s.mark&&s.mark.source)||s.mark_source||''; return `<tr><td><b>${esc(s.candidate_name||'Anonymous')}</b><div class="muted">${esc(s.candidate_email||'')}</div><div class="muted">${(s.answers||[]).length} answers</div></td>
+    <td>${esc(s.role_slug)}</td>
+    <td><b>${s.average_score}</b><div class="muted">${src?'marked by '+esc(src):'—'}</div></td>
     <td><span class="badge ${s.passed?'pass':'fail'}">${s.passed?'Passed, next round':'Not passed'}</span></td>
-    <td class="muted">${esc(s.created_at||'')}</td></tr>`).join('')}</tbody></table></div>`;
+    <td>${recBadge(s.recommendation || (s.mark&&s.mark.recommendation))}</td>
+    <td class="muted">${esc(s.created_at||'')}</td>
+    <td><button class="view-btn" onclick="openSession(${s.id})">View mark</button></td></tr>`; }).join('')}</tbody></table></div>`;
 }
+function recBadge(rec){
+  const map = {
+    strong_hire: ['Strong hire', 'rec'],
+    hire: ['Hire', 'pass'],
+    borderline: ['Borderline', 'borderline'],
+    no_hire: ['No hire', 'nohire'],
+  };
+  const [label, cls] = map[rec] || ['—', 'rec'];
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+function listHtml(items, fallback){
+  const arr = (items||[]).filter(Boolean);
+  if(!arr.length) return `<li>${esc(fallback)}</li>`;
+  return arr.map(t=>`<li>${esc(t)}</li>`).join('');
+}
+async function openSession(id){
+  let data;
+  try { data = await api('/admin/sessions/' + id); }
+  catch(e){ toast('Could not load session: ' + e.message); return; }
+  const s = data.session || {};
+  const mark = s.mark || {};
+  const score = mark.overall_score ?? s.average_score ?? '—';
+  const threshold = mark.pass_threshold ?? '—';
+  const source = mark.source || s.mark_source || 'local';
+  const rec = mark.recommendation || s.recommendation || '';
+  const strengths = mark.strengths || [];
+  const improvements = mark.improvements || [];
+  let qmarks = mark.question_marks || [];
+  if(!qmarks.length){
+    qmarks = (s.answers||[]).map(a=>({question:a.question, score:a.score, comment:a.feedback}));
+  }
+  let convo = s.conversation || [];
+  if(!convo.length){
+    (s.answers||[]).forEach(a=>{
+      if(a.question) convo.push({role:'assistant', content:a.question});
+      if(a.answer) convo.push({role:'user', content:a.answer});
+    });
+  }
+  $('session-modal-title').textContent = (s.candidate_name || 'Anonymous candidate');
+  $('session-modal-sub').textContent = `${s.role_slug||''} • ${s.created_at||''}`;
+  $('session-modal-body').innerHTML = `
+    <div class="mark-hero">
+      <div class="mark-score">${esc(score)}<small> / 10</small></div>
+      <div class="mark-body">
+        ${recBadge(rec)}
+        <p>${esc(mark.summary || 'No written summary was returned for this interview.')}</p>
+        <div class="muted" style="margin-top:6px">Pass mark ${esc(threshold)}/10 • final mark from ${esc(source)} • ${s.passed?'passed':'not passed'}</div>
+      </div>
+    </div>
+    <div class="mark-cols">
+      <div class="mark-box"><h4>Strengths</h4><ul>${listHtml(strengths, 'No standout strengths recorded.')}</ul></div>
+      <div class="mark-box"><h4>Improvements</h4><ul>${listHtml(improvements, 'No improvement notes recorded.')}</ul></div>
+    </div>
+    <h4 style="font-size:13px;font-weight:700;margin:4px 0 10px">Question-by-question</h4>
+    ${qmarks.length ? qmarks.map(q=>`<div class="qmark"><div class="qtop"><b>${esc(q.score ?? '—')}</b><span>${esc(q.question||'Answer')}</span></div>${q.comment?`<p>${esc(q.comment)}</p>`:''}</div>`).join('') : '<div class="empty">No per-question notes.</div>'}
+    <h4 style="font-size:13px;font-weight:700;margin:20px 0 10px">Full conversation</h4>
+    <div class="convo">${convo.length ? convo.map(t=>`<div class="turn ${t.role==='assistant'?'assistant':'user'}"><b>${t.role==='assistant'?'Talha':'Candidate'}</b>${esc(t.content||'')}</div>`).join('') : '<div class="empty">Transcript not stored for this interview.</div>'}</div>`;
+  $('session-modal').hidden = false;
+}
+window.openSession = openSession;
+$('session-modal-close').onclick = ()=>{ $('session-modal').hidden = true; };
+$('session-modal').onclick = (e)=>{ if(e.target === $('session-modal')) $('session-modal').hidden = true; };
+document.addEventListener('keydown', (e)=>{ if(e.key === 'Escape') $('session-modal').hidden = true; });
 function copyLink(slug){
   const url = location.origin + '/interview/' + slug;
   navigator.clipboard.writeText(url).then(()=>toast('Interview link copied ✓')).catch(()=>prompt('Copy this link:', url));

@@ -141,6 +141,9 @@ let pendingTools = [];
 // Interview progress state
 let currentQ = 0;
 let scores = [];
+// Full transcript of finalised lines — sent to the final marking model at the
+// end of the interview so the whole conversation is judged, not just snippets.
+let conversation = [];
 
 function getCandidate() {
   const nameEl = $('candidate-name');
@@ -191,7 +194,10 @@ function queueToolResult(callId, name, result) {
 
 async function runClientTool(name, args) {
   const cand = getCandidate();
-  const body = { tool: name, arguments: { ...args, session_id: SESSION_ID, ...cand } };
+  const toolArgs = { ...args, session_id: SESSION_ID, ...cand };
+  // Only the closing summary needs the transcript; keep the other calls small.
+  if (name === 'get_session_summary') toolArgs.conversation = conversation;
+  const body = { tool: name, arguments: toolArgs };
   const res = await fetch('/tool', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -272,7 +278,8 @@ function showResult(result) {
   const tipsEl = $('result-tips');
   const nextBtn = $('result-next');
   const titleEl = $('result-title');
-  const avg = result.average_score ?? avgScore();
+  const mark = result.mark || {};
+  const avg = mark.overall_score ?? result.average_score ?? avgScore();
   if (scoreEl) scoreEl.textContent = avg;
   const passed = !!result.passed;
   if (verdictEl) {
@@ -280,15 +287,26 @@ function showResult(result) {
     verdictEl.className = 'verdict ' + (passed ? 'pass' : 'fail');
   }
   if (titleEl) titleEl.textContent = passed ? 'You passed! 🎉' : 'Interview complete';
-  if (summaryEl) summaryEl.textContent = result.summary || `You answered ${result.questions_answered || scores.length} questions for ${ROLE_NAME}. Average ${avg}/10.`;
+  if (summaryEl) summaryEl.textContent = mark.summary || result.summary || `You answered ${result.questions_answered || scores.length} questions for ${ROLE_NAME}. Final mark ${avg}/10.`;
+  const strengthsBox = $('result-strengths-box');
+  const strengthsEl = $('result-strengths');
+  if (strengthsBox && strengthsEl) {
+    strengthsEl.innerHTML = '';
+    (mark.strengths || result.strengths || []).forEach((t) => {
+      const li = document.createElement('li');
+      li.textContent = t;
+      strengthsEl.append(li);
+    });
+    strengthsBox.style.display = strengthsEl.children.length ? '' : 'none';
+  }
   if (tipsEl) {
     tipsEl.innerHTML = '';
-    (result.top_tips || []).forEach((t) => {
+    (mark.improvements || result.top_tips || []).forEach((t) => {
       const li = document.createElement('li');
       li.textContent = t;
       tipsEl.append(li);
     });
-    if (!result.top_tips || !result.top_tips.length) {
+    if (!tipsEl.children.length) {
       const li = document.createElement('li');
       li.textContent = 'Keep answers structured with STAR: Situation, Task, Action, Result.';
       tipsEl.append(li);
@@ -417,6 +435,11 @@ async function start() {
   if (micSel) micSel.disabled = true;
   setStatus('connecting');
   getCandidate();
+  // A fresh call gets a fresh transcript and score list.
+  conversation = [];
+  scores = [];
+  const scoreList = $('scores-list');
+  if (scoreList) scoreList.replaceChildren();
 
   try {
     const res = await fetch('/token');
@@ -555,12 +578,14 @@ async function start() {
 
         case 'transcript.user':
           addLine('you', msg.text);
+          if (msg.text && msg.text.trim()) conversation.push({ role: 'user', content: msg.text.trim() });
           logEvent('down', msg.type, msg.text);
           break;
 
         case 'transcript.agent':
           printedReply = msg.reply_id ?? printedReply;
           addLine('agent', msg.text);
+          if (msg.text && msg.text.trim()) conversation.push({ role: 'assistant', content: msg.text.trim() });
           logEvent('down', msg.type, msg.text);
           break;
 

@@ -2,12 +2,12 @@
 
 Handles three tools called by the AssemblyAI voice agent:
   - get_question    → returns the next interview question for a role
-  - evaluate_answer → scores an answer with local heuristics
-  - get_session_summary → returns a final session report
+  - evaluate_answer → scores an answer with local heuristics (live coaching)
+  - get_session_summary → marks the whole conversation with the final LLM
 
-Powered entirely by the AssemblyAI Voice Agent API — no OpenAI key needed.
-The managed LLM inside AssemblyAI handles all dialogue and coaching feedback.
-This server only does the structured scoring math (word count, fillers, STAR).
+The managed LLM inside AssemblyAI handles dialogue and coaching feedback.
+Live per-answer scores use the local heuristic math (word count, fillers,
+STAR); the official candidate mark comes from marking.py at session end.
 
 Runs on port 8002. The browser forwards client-side tool.call events here.
 
@@ -22,6 +22,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from database import get_role, init_db, list_roles, save_session, seed_default_roles
+from marking import mark_conversation
 
 # ---------------------------------------------------------------------------
 # Question bank — realistic questions per role category
@@ -249,24 +250,34 @@ def handle_get_session_summary(args: dict) -> dict:
         return {"error": "No answers recorded in this session."}
 
     scores = [a["score"] for a in answers]
-    avg_score = round(sum(scores) / len(scores), 1)
+    heuristic_avg = round(sum(scores) / len(scores), 1)
 
     role = get_role(role_slug)
     threshold = role["pass_threshold"] if role else 6.0
-    passed = avg_score >= threshold
     # Legacy custom link (optional now). The auto-generated pass is primary.
     custom_url = (role["onboarding_url"] if role else "") or ""
 
     candidate_name = session.get("candidate_name") or args.get("candidate_name")
     candidate_email = session.get("candidate_email") or args.get("candidate_email")
 
-    # Collect all feedback tips
-    all_tips = [a["feedback"] for a in answers if a.get("feedback")]
-    unique_tips = list(dict.fromkeys(all_tips))[:3]  # top 3 unique tips
+    # The browser sends the complete transcript. That whole conversation is
+    # handed to the final marking model, whose score becomes the official mark.
+    conversation = args.get("conversation") or session.get("conversation") or []
+    mark = mark_conversation(
+        role, conversation, answers, threshold, role_name=role_name)
+    avg_score = mark.get("overall_score", heuristic_avg)
+    passed = bool(mark.get("passed", avg_score >= threshold))
 
-    # Persist the result (with candidate details when provided)
-    save_session(role_slug, answers, avg_score, passed,
-                 candidate_name=candidate_name, candidate_email=candidate_email)
+    # Collect improvement tips from the final mark, falling back to per-answer
+    # coaching feedback when the marking model returned none.
+    all_tips = [a["feedback"] for a in answers if a.get("feedback")]
+    unique_tips = (mark.get("improvements") or list(dict.fromkeys(all_tips)))[:3]
+
+    # Persist the result (with candidate details, transcript and final mark).
+    saved_session_id = save_session(
+        role_slug, answers, avg_score, passed,
+        candidate_name=candidate_name, candidate_email=candidate_email,
+        conversation=conversation, mark=mark)
 
     # Auto-generate the next-round pass link for passed candidates.
     # The browser turns onboarding_path into an absolute URL, so this works
@@ -290,6 +301,7 @@ def handle_get_session_summary(args: dict) -> dict:
                             "candidate_name": "", "candidate_email": ""}
 
     return {
+        "session_id": saved_session_id,
         "role": role_name,
         "role_slug": role_slug,
         "questions_answered": len(answers),
@@ -301,9 +313,13 @@ def handle_get_session_summary(args: dict) -> dict:
         "onboarding_url": onboarding_path or custom_url,
         "custom_onboarding_url": custom_url,
         "top_tips": unique_tips,
-        "summary": (
+        "strengths": mark.get("strengths", []),
+        "recommendation": mark.get("recommendation", ""),
+        "mark_source": mark.get("source", ""),
+        "mark": mark,
+        "summary": mark.get("summary") or (
             f"You answered {len(answers)} questions for the {role_name} role. "
-            f"Your average score was {avg_score} out of 10."
+            f"Your final mark was {avg_score} out of 10."
         ),
     }
 

@@ -75,9 +75,11 @@ Create your admin account at `/login`, set up a role, copy the interview link, a
 
 ---
 
-## 🧠 How scoring works
+## 🧠 How marking works
 
-Every answer is scored out of 10 on **length fit** (50–200 spoken words), **filler-word control**, and **STAR-structure bonus**, against a per-role pass threshold. Each question carries a *"what good looks like"* rubric so every candidate is judged the same way.
+During the call, each answer gets a quick live score out of 10 on **length fit** (50–200 spoken words), **filler-word control**, and **STAR-structure bonus** — that is only the candidate's running feedback.
+
+When the interview ends, the **entire conversation** (every question, answer and follow-up) is sent to a **final marking model** (Vultr DeepSeek first, then OpenAI). It returns the official mark: an overall score out of 10, a hire recommendation (`strong_hire` / `hire` / `borderline` / `no_hire`), an evidence-based summary, strengths, improvements and a per-question breakdown. That mark decides pass/fail and is what the admin sees in the hiring dashboard. Without an LLM key, a deterministic local mark is produced from the per-answer scores.
 
 ---
 
@@ -86,7 +88,8 @@ Every answer is scored out of 10 on **length fit** (50–200 spoken words), **fi
 ```
 ├── backend/                  # Python servers (stdlib only)
 │   ├── server.py             # pages, auth, token minting, tool proxy, media
-│   ├── interview_tools_server.py  # questions, scoring, passes (:8002)
+│   ├── interview_tools_server.py  # questions, live scoring, passes (:8002)
+│   ├── marking.py            # final whole-conversation LLM marking
 │   └── database.py           # SQLite: users, roles, sessions, passes
 ├── templates/                # landing, interview room, admin, auth, pass
 ├── static/app.js             # browser voice client (WebSocket + audio worklets)
@@ -106,7 +109,7 @@ The SQLite database (`interviewcoach.db`) is created and seeded automatically on
 |---|---|---|
 | `get_question` | each round | next interview question for the role |
 | `evaluate_answer` | after each answer | score + coaching tip |
-| `get_session_summary` | at the end | average, verdict, tips, auto-issues pass link if passed |
+| `get_session_summary` | at the end | sends the full conversation to the final marking model, saves the official mark, auto-issues a pass link if passed |
 
 Change the interviewer's voice anytime with one line in `agents/interview-coach.jsonc`:
 

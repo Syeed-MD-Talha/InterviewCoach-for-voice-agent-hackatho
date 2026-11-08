@@ -214,7 +214,9 @@ def _proxy_tool(body: bytes):
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as res:
+        # Final marking calls an LLM and can take a while; allow enough time
+        # so the fallback path never re-runs (and double-charges) the mark.
+        with urllib.request.urlopen(req, timeout=60) as res:
             return 200, res.read()
     except urllib.error.HTTPError as err:
         # 502/503/504 mean the tools server is down (or a proxy can't reach it),
@@ -835,6 +837,21 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._send(404, b'{"error":"role not found"}', "application/json")
                 return
+
+        if path.startswith("/admin/sessions/") and self.command == "GET":
+            from database import get_session
+            raw_id = path[len("/admin/sessions/"):].strip().strip("/")
+            try:
+                session_id = int(raw_id)
+            except ValueError:
+                self._send(400, b'{"error":"invalid session id"}', "application/json")
+                return
+            session = get_session(session_id, owner_id=user["id"])
+            if not session:
+                self._send(404, b'{"error":"session not found"}', "application/json")
+                return
+            self._send(200, json.dumps({"session": session}).encode(), "application/json")
+            return
 
         if path == "/admin/sessions" and self.command == "GET":
             sessions = list_sessions(owner_id=user["id"], mine_only=True)
