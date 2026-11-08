@@ -6,6 +6,7 @@ interviewcoach.db in the project root (next to .env).
 
 import hashlib
 import json
+import re
 import secrets
 import sqlite3
 import time
@@ -321,9 +322,31 @@ def list_roles(owner_id: int | None = None, mine_only: bool = False) -> list[dic
 
 
 def get_role(slug: str) -> dict[str, Any] | None:
+    """Look up a role by slug, falling back to a name match.
+
+    The voice agent is told the role as a human title ("Junior Software
+    Engineer"), so a slug-only lookup would miss and silently serve the
+    generic question bank.
+    """
+    key = (slug or "").strip()
+    if not key:
+        return None
     with _connect() as conn:
-        row = conn.execute("SELECT * FROM roles WHERE slug = ?", (slug,)).fetchone()
-        return _role_from_row(row) if row else None
+        row = conn.execute("SELECT * FROM roles WHERE slug = ?", (key,)).fetchone()
+        if row:
+            return _role_from_row(row)
+        row = conn.execute(
+            "SELECT * FROM roles WHERE lower(name) = lower(?)", (key,)
+        ).fetchone()
+        if row:
+            return _role_from_row(row)
+        # Last resort: normalise "Junior Software Engineer" -> "junior-software-engineer".
+        guess = re.sub(r"[^a-z0-9]+", "-", key.lower()).strip("-")
+        if guess and guess != key:
+            row = conn.execute("SELECT * FROM roles WHERE slug = ?", (guess,)).fetchone()
+            if row:
+                return _role_from_row(row)
+        return None
 
 
 def create_role(role: dict[str, Any]) -> dict[str, Any]:

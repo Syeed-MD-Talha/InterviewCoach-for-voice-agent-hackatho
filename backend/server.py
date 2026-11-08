@@ -173,8 +173,40 @@ def _save_agent_id(agent_id: str) -> None:
 INTERVIEW_TOOLS_URL = "http://localhost:8002/tool"
 
 
+def _local_tool(body: bytes):
+    """Run a tool call in-process.
+
+    The tools server is a separate process, but its handlers are plain
+    functions over stdlib + SQLite. Calling them directly means the interview
+    still works when only this server is running — no second terminal, no
+    connection-refused dead end mid-interview.
+    """
+    try:
+        data = json.loads(body or b"{}")
+    except json.JSONDecodeError:
+        return 400, json.dumps({"error": "invalid JSON"}).encode()
+    tool = data.get("tool", "")
+    args = data.get("arguments", {}) or {}
+    try:
+        import interview_tools_server as tools
+        tools.init_db()
+        tools.seed_default_roles()
+        handlers = {
+            "get_question": tools.handle_get_question,
+            "evaluate_answer": tools.handle_evaluate_answer,
+            "get_session_summary": tools.handle_get_session_summary,
+        }
+        handler = handlers.get(tool)
+        if not handler:
+            return 404, json.dumps({"error": f"unknown tool: {tool}"}).encode()
+        return 200, json.dumps(handler(args)).encode()
+    except Exception as err:  # noqa: BLE001 - surface any failure to the agent
+        print(f"In-process tool {tool} failed: {err}")
+        return 500, json.dumps({"error": f"tool failed: {err}"}).encode()
+
+
 def _proxy_tool(body: bytes):
-    """Forward a tool call to interview_tools_server.py. Returns (status, data)."""
+    """Forward a tool call to interview_tools_server.py, falling back in-process."""
     req = urllib.request.Request(
         INTERVIEW_TOOLS_URL,
         data=body,
@@ -185,18 +217,22 @@ def _proxy_tool(body: bytes):
         with urllib.request.urlopen(req, timeout=20) as res:
             return 200, res.read()
     except urllib.error.HTTPError as err:
+        # 502/503/504 mean the tools server is down (or a proxy can't reach it),
+        # not that the tool itself failed — serve it here instead.
+        if err.code in (502, 503, 504):
+            return _local_tool(body)
         return err.code, err.read()
-    except OSError as err:
-        error = json.dumps({"error": f"Interview tools server unreachable: {err}. Run: python backend/interview_tools_server.py"}).encode()
-        return 502, error
+    except OSError:
+        # Tools server not running (or not reachable): serve it here instead.
+        return _local_tool(body)
 
 
 # ---------------------------------------------------------------------------
-# JD/topics -> question bank generator (local heuristic + optional OpenAI)
+# JD/topics -> question bank generator (local heuristic + optional LLM)
 # ---------------------------------------------------------------------------
 
 def _generate_questions_local(role_name: str, jd_text: str, topics: list, count: int = 5) -> list[dict]:
-    """Role-aware fallback used when no OPENAI_API_KEY is set.
+    """Role-aware fallback used when no LLM API key is set.
 
     Picks a role family (engineer, qa, designer, marketing, data, pm, general),
     then builds a behavioral/situational/technical mix: one tailored question per
@@ -406,8 +442,9 @@ def _generate_questions_openai(role_name: str, jd_text: str, topics: list, count
 
 
 def _generate_questions_llm(role_name: str, jd_text: str, topics: list, count: int,
-                            base_url: str, api_key: str, models: list[str]) -> list[dict] | None:
-    """Shared OpenAI-compatible chat caller (used for Groq and OpenAI).
+                            base_url: str, api_key: str, models: list[str],
+                            extra: dict | None = None) -> list[dict] | None:
+    """Shared OpenAI-compatible chat caller (used for Vultr and OpenAI).
 
     Tries each model in order; returns None if all fail.
     """
@@ -420,12 +457,15 @@ def _generate_questions_llm(role_name: str, jd_text: str, topics: list, count: i
     )
     for model in models:
         try:
-            body = json.dumps({
+            payload = {
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.6,
                 "max_tokens": 1200,
-            }).encode()
+            }
+            if extra:
+                payload.update(extra)
+            body = json.dumps(payload).encode()
             req = urllib.request.Request(
                 base_url, data=body, method="POST",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -450,23 +490,28 @@ def _generate_questions_llm(role_name: str, jd_text: str, topics: list, count: i
     return None
 
 
-def _generate_questions_mistral(role_name: str, jd_text: str, topics: list, count: int) -> list[dict] | None:
-    """Draft via Mistral (OpenAI-compatible API). Used when Groq is rate-limited."""
-    api_key = os.environ.get("MISTRAL_API_KEY", "")
+def _generate_questions_vultr(role_name: str, jd_text: str, topics: list, count: int) -> list[dict] | None:
+    """Draft via Vultr Serverless Inference (OpenAI-compatible API)."""
+    api_key = os.environ.get("VULTR_API_KEY", "")
     if not api_key:
         return None
     models = [m.strip() for m in os.environ.get(
-        "MISTRAL_MODEL", "mistral-small-latest").split(",") if m.strip()]
+        "VULTR_MODEL", "deepseek-v4.1-flash-1017").split(",") if m.strip()]
+    base_url = os.environ.get("VULTR_API_BASE", "https://api.vultrinference.com/v1").rstrip("/")
+    extra = {}
+    effort = os.environ.get("VULTR_REASONING_EFFORT", "low").strip()
+    if effort:
+        extra["reasoning_effort"] = effort
     return _generate_questions_llm(role_name, jd_text, topics, count,
-                                    "https://api.mistral.ai/v1/chat/completions",
-                                    api_key, models)
+                                    base_url + "/chat/completions",
+                                    api_key, models, extra)
 
 
 def _generate_questions(role_name: str, jd_text: str, topics: list, count: int) -> tuple[list[dict], str]:
     count = max(1, min(8, int(count or 5)))
-    mistral = _generate_questions_mistral(role_name, jd_text, topics, count)
-    if mistral:
-        return mistral, "mistral"
+    vultr = _generate_questions_vultr(role_name, jd_text, topics, count)
+    if vultr:
+        return vultr, "vultr"
     ai = _generate_questions_openai(role_name, jd_text, topics, count)
     if ai:
         return ai, "openai"

@@ -158,13 +158,35 @@ try {
   if (e && $('candidate-email')) $('candidate-email').value = e;
 } catch (_) {}
 
-async function flushToolsIfIdle() {
-  if (lastEvent !== 'reply.done' || !pendingTools.length) return;
-  for (const tool of pendingTools) {
-    try { ws.send(JSON.stringify({ type: 'tool.result', call_id: tool.call_id, result: JSON.stringify(tool.result) })); } catch (_) {}
-    logEvent('up', 'tool.result', `${tool.name} → ${JSON.stringify(tool.result).slice(0, 90)}`);
-  }
+// Client-side tools follow the documented flow: accumulate the result, then
+// send tool.result once reply.done is the latest event. A short fallback timer
+// guarantees a result is never stranded if reply.done is missed.
+let toolFlushTimer = null;
+
+function flushTools() {
+  if (toolFlushTimer) { clearTimeout(toolFlushTimer); toolFlushTimer = null; }
+  if (!pendingTools.length) return;
+  if (!ws || ws.readyState !== 1) return; // keep queued until the socket is up
+  const queued = pendingTools;
   pendingTools = [];
+  for (const tool of queued) {
+    try {
+      ws.send(JSON.stringify({ type: 'tool.result', call_id: tool.call_id, result: JSON.stringify(tool.result) }));
+      logEvent('up', 'tool.result', `${tool.name} → ${JSON.stringify(tool.result).slice(0, 90)}`);
+    } catch (_) {}
+  }
+}
+
+function queueToolResult(callId, name, result) {
+  pendingTools.push({ call_id: callId, name, result });
+  if (lastEvent === 'reply.done') {
+    flushTools();
+    return;
+  }
+  // Safety net: if reply.done never arrives the agent would sit silent until
+  // the tool timeout fires, so release the result after a short grace period.
+  if (toolFlushTimer) clearTimeout(toolFlushTimer);
+  toolFlushTimer = setTimeout(() => { toolFlushTimer = null; flushTools(); }, 3000);
 }
 
 async function runClientTool(name, args) {
@@ -448,11 +470,6 @@ async function start() {
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'session.update', session: { agent_id: AGENT.id } }));
       logEvent('up', 'session.update', AGENT.id);
-      if (ROLE_SLUG) {
-        const intro = `I am interviewing for the ${ROLE_NAME || ROLE_SLUG} role.`;
-        ws.send(JSON.stringify({ type: 'input.text', text: intro }));
-        logEvent('up', 'input.text', intro);
-      }
     };
 
     ws.onmessage = ({ data }) => {
@@ -461,6 +478,16 @@ async function start() {
         case 'session.ready':
           ready = true;
           try { sessionStorage.removeItem('ic_cfg_reload'); } catch (_) {}
+          // Seed the role as conversation context. input.text is not a valid
+          // message type; conversation.message is the documented way to inject
+          // context without the candidate having to say it out loud.
+          if (ROLE_SLUG) {
+            const intro = `I am interviewing for the ${ROLE_NAME || ROLE_SLUG} role. The role slug is ${ROLE_SLUG}.`;
+            try {
+              ws.send(JSON.stringify({ type: 'conversation.message', role: 'user', content: intro }));
+              logEvent('up', 'conversation.message', intro);
+            } catch (_) {}
+          }
           callStart = Date.now();
           timer = setInterval(tick, 1000);
           tick();
@@ -474,6 +501,7 @@ async function start() {
           playback?.port.postMessage('stop');
           setStatus('listening');
           setAvatar('listening');
+          stopAgentMeter();
           lastEvent = msg.type;
           logEvent('down', msg.type);
           break;
@@ -481,6 +509,7 @@ async function start() {
         case 'reply.started':
           setStatus('speaking');
           setAvatar('speaking');
+          startAgentMeter();
           lastEvent = msg.type;
           logEvent('down', msg.type);
           break;
@@ -497,12 +526,14 @@ async function start() {
         case 'reply.done':
           setStatus('listening');
           setAvatar('listening');
+          stopAgentMeter();
           lastEvent = msg.type;
           if (msg.status === 'interrupted') {
             playback?.port.postMessage('stop');
+            stopAgentMeter();
             pendingTools = [];
           } else {
-            flushToolsIfIdle();
+            flushTools();
           }
           logEvent('down', msg.type, msg.status);
           break;
@@ -534,18 +565,13 @@ async function start() {
           break;
 
         case 'tool.call': {
+          // Tool traffic stays in the debug log — candidates should only ever
+          // see the conversation, never raw function calls.
           const args = JSON.stringify(msg.arguments ?? {});
-          addLine('tool', `${msg.name}(${args})`);
           logEvent('down', msg.type, `${msg.name} ${args}`);
           runClientTool(msg.name, msg.arguments ?? {})
-            .then((result) => {
-              pendingTools.push({ call_id: msg.call_id, name: msg.name, result });
-              flushToolsIfIdle();
-            })
-            .catch((err) => {
-              pendingTools.push({ call_id: msg.call_id, name: msg.name, result: { error: err.message } });
-              flushToolsIfIdle();
-            });
+            .then((result) => queueToolResult(msg.call_id, msg.name, result))
+            .catch((err) => queueToolResult(msg.call_id, msg.name, { error: err.message }));
           break;
         }
 
@@ -623,40 +649,59 @@ function setStatus(state, detail) {
   if (txt) txt.textContent = detail || state;
 }
 
-// Both interview videos run continuously (muted) once the call starts, so
-// switching states is an instant opacity crossfade with zero play() latency.
+// Both interview videos are preloaded once the call starts so switching states
+// is an instant opacity crossfade with zero play() latency.
 function ensurePlaying(v) {
   if (!v) return;
   try { if (v.paused) { const p = v.play(); if (p) p.catch(() => {}); } } catch (_) {}
 }
 
+function pauseVideo(v) {
+  try { if (v && !v.paused) v.pause(); } catch (_) {}
+}
+
+function restartVideo(v) {
+  if (!v) return;
+  try { v.currentTime = 0; } catch (_) {}
+  ensurePlaying(v);
+}
+
 function warmVideos() {
-  ensurePlaying($('vid-listening'));
-  ensurePlaying($('vid-speaking'));
+  // Load both decoders up front, but only the active one plays.
+  for (const id of ['vid-listening', 'vid-speaking']) {
+    const v = $(id);
+    if (!v) continue;
+    try { v.load(); } catch (_) {}
+  }
 }
 
 function restVideos() {
-  for (const id of ['vid-listening', 'vid-speaking']) {
-    try { $(id)?.pause(); } catch (_) {}
-  }
+  for (const id of ['vid-listening', 'vid-speaking']) pauseVideo($(id));
+  stopAgentMeter();
 }
 
 function setAvatar(state) {
   const avatar = $('avatar');
   const label = $('avatar-label');
   const wave = $('wave');
+  const speaking = $('vid-speaking');
+  const listening = $('vid-listening');
   // Logo at rest; listening video loops while the candidate talks;
-  // speaking video loops while Talha talks.
+  // speaking video restarts from frame 0 so the mouth moves with the audio.
   if (avatar) {
     avatar.classList.remove('show-logo', 'show-listening', 'show-speaking');
-    if (state === 'speaking' && $('vid-speaking')) {
+    if (state === 'speaking' && speaking) {
       avatar.classList.add('show-speaking');
-      ensurePlaying($('vid-speaking'));
-    } else if (state === 'listening' && $('vid-listening')) {
+      pauseVideo(listening);
+      restartVideo(speaking);
+    } else if (state === 'listening' && listening) {
       avatar.classList.add('show-listening');
-      ensurePlaying($('vid-listening'));
+      pauseVideo(speaking);
+      restartVideo(listening);
     } else {
       avatar.classList.add('show-logo');
+      pauseVideo(speaking);
+      pauseVideo(listening);
     }
   }
   if (wave) wave.classList.toggle('live', state === 'speaking');
@@ -665,6 +710,56 @@ function setAvatar(state) {
   else if (state === 'listening') label.textContent = 'Listening to you — speak now';
   else if (state === 'connecting') label.textContent = 'Connecting…';
   else if (state === 'idle') label.textContent = currentQ > 0 ? 'Call ended — review your transcript' : 'Ready when you are';
+}
+
+// Drive the waveform from Talha's real playback level so the avatar visibly
+// reacts to his voice instead of running a fixed CSS animation.
+let agentRaf = null;
+let agentAnalyser = null;
+let agentSink = null;
+
+function startAgentMeter() {
+  stopAgentMeter();
+  if (!playbackCtx || !playback) return;
+  try {
+    agentAnalyser = playbackCtx.createAnalyser();
+    agentAnalyser.fftSize = 256;
+    // A muted sink keeps the analyser pulled by the graph without doubling
+    // the audible output (playback already connects to the destination).
+    agentSink = playbackCtx.createGain();
+    agentSink.gain.value = 0;
+    playback.connect(agentAnalyser);
+    agentAnalyser.connect(agentSink);
+    agentSink.connect(playbackCtx.destination);
+    const buf = new Float32Array(agentAnalyser.fftSize);
+    const bars = Array.from(document.querySelectorAll('#wave i'));
+    if (!bars.length) return;
+    const loop = () => {
+      agentAnalyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      const rms = Math.sqrt(sum / buf.length);
+      const level = Math.min(1, rms * 7);
+      const t = performance.now() / 110;
+      bars.forEach((bar, i) => {
+        const wobble = 0.5 + 0.5 * Math.sin(t + i * 0.85);
+        bar.style.height = (7 + level * 25 * wobble).toFixed(1) + 'px';
+      });
+      agentRaf = requestAnimationFrame(loop);
+    };
+    loop();
+  } catch (_) {}
+}
+
+function stopAgentMeter() {
+  if (agentRaf) cancelAnimationFrame(agentRaf);
+  agentRaf = null;
+  try { if (agentAnalyser && playback) playback.disconnect(agentAnalyser); } catch (_) {}
+  try { agentAnalyser?.disconnect(); } catch (_) {}
+  try { agentSink?.disconnect(); } catch (_) {}
+  agentAnalyser = null;
+  agentSink = null;
+  document.querySelectorAll('#wave i').forEach((bar) => { bar.style.height = ''; });
 }
 
 const COST_PER_SECOND = 4.5 / 3600;

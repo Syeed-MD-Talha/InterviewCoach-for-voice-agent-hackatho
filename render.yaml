@@ -8,5 +8,5 @@ services:
     envVars:
       - key: ASSEMBLYAI_API_KEY
         sync: false
-      - key: MISTRAL_API_KEY
+      - key: VULTR_API_KEY
         sync: false

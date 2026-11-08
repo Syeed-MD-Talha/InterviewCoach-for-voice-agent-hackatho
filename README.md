@@ -8,7 +8,7 @@
 
 **For employers (hiring dashboard, sign-in required)**
 - Create roles with JD, topics, and pass score — interview links auto-generate
-- AI-drafted question banks (Mistral, with role-aware local fallback) + voice dictation
+- AI-drafted question banks (Vultr DeepSeek, with role-aware local fallback) + voice dictation
 - Live transcripts, per-answer scores, pass rates, and auto-issued next-round passes
 
 **For candidates (one link, no account)**
@@ -46,7 +46,7 @@ Edit `.env`:
 
 ```
 ASSEMBLYAI_API_KEY=your_key_here   # required — https://www.assemblyai.com/dashboard/api-keys
-MISTRAL_API_KEY=...                # optional — AI-drafted questions (local templates otherwise)
+VULTR_API_KEY=...                  # optional — AI-drafted questions (local templates otherwise)
 ```
 
 ### 2. Start the tools server (terminal 1, from the project root)
@@ -120,4 +120,4 @@ Change the interviewer's voice anytime with one line in `agents/interview-coach.
 
 - [AssemblyAI Voice Agent API](https://www.assemblyai.com/docs/voice-agents/voice-agent-api) — real-time STT, managed LLM, TTS, turn detection
 - Python 3.9+ standard library — zero installs for the core
-- [Mistral AI](https://mistral.ai/) (optional) — AI-drafted question banks
+- [Vultr Serverless Inference](https://www.vultr.com/products/serverless-inference/) (optional) — AI-drafted question banks via `deepseek-v4.1-flash-1017`

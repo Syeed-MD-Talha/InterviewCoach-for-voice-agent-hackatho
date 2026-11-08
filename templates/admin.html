@@ -278,7 +278,7 @@ $('gen-btn').onclick = async () => {
       count: parseInt($('qcount').value, 10) || 5,
     })});
     bank = data.questions || [];
-    $('gen-source').textContent = ['mistral', 'openai'].includes(data.source) ? '(AI-powered)' : '(local templates — add a MISTRAL_API_KEY for AI drafting)';
+    $('gen-source').textContent = ['vultr', 'openai'].includes(data.source) ? '(AI-powered)' : '(local templates — add a VULTR_API_KEY for AI drafting)';
     renderBank();
     toast(bank.length + ' questions drafted. Review and save ✓');
   } catch(e){ toast('Generate failed: ' + e.message); }

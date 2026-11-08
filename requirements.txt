@@ -1,5 +1,22 @@
-# InterviewCoach — AssemblyAI Voice Agent Hackathon
-# Python standard library only — no pip install needed.
+# InterviewCoach - AssemblyAI Voice Agent Hackathon
 #
-# The full voice pipeline (STT + LLM + TTS + turn detection) runs inside the
-# AssemblyAI Voice Agent API. The local tools server uses stdlib only.
+# Runtime dependencies: NONE.
+# The backend is pure Python standard library (http.server, sqlite3, urllib,
+# json, hashlib, secrets, re) and the browser client is plain JS - no bundler,
+# no npm packages. The full voice pipeline (STT + LLM + TTS + turn detection)
+# runs inside the AssemblyAI Voice Agent API, so there is no SDK to install.
+#
+# Requires: Python 3.9+ (see .python-version -> 3.12)
+#
+#   pip install -r requirements.txt   # no-op, kept for tooling compatibility
+#
+# Optional extras - uncomment only if you want them:
+#
+#   # Test/lint tooling (not required to run the app)
+#   # pytest>=8.0
+#   # ruff>=0.5
+#
+# API keys are configured in .env, not here:
+#   ASSEMBLYAI_API_KEY  (required)  https://www.assemblyai.com/dashboard/api-keys
+#   VULTR_API_KEY       (optional)  AI-drafted question banks (Vultr DeepSeek)
+#   OPENAI_API_KEY      (optional)  alternative AI drafting backend
